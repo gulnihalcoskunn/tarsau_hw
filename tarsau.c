@@ -1,267 +1,263 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <stdbool.h>
 
 #define MAX_FILES 32
-#define MAX_FILENAME_LENGTH 256
-#define MAX_TOTAL_SIZE 200 * 1024 * 1024 // 200 MB
+#define MAX_SIZE (200 * 1024 * 1024) // 200 MB
+#define LINE_BUFFER_SIZE 1000
+#define FILENAME_BUFFER_SIZE 256
+#define CONTENT_BUFFER_SIZE 512
+#define FILEPATH_BUFFER_SIZE 512
 
-// Function prototypes
-void createArchive(char *outputFile, char *files[], int numFiles);
-void extractArchive(char *archiveFile, char *outputDir);
+typedef struct {
+    char filename[FILENAME_BUFFER_SIZE];
+    char permissions[10];
+    size_t size;
+    char *content;  // Dynamic buffer to store file content
+} FileInfo;
+
+void freeFileInfoContent(FileInfo *fileInfos, int numFiles);
+
+void writeToArchive(FileInfo *fileInfos, int numFiles, long totalSize, const char *outputFileName);
+
+void processFile(FileInfo *fileInfos, int *numFiles, long *totalSize, const char *filename);
+
+void readArchive(const char *archiveFileName, FileInfo *fileInfos, int *numFiles);
+
+void extractArchive(const char *archiveFileName, FileInfo *fileInfos, int numFiles, const char *extractDirectory);
+
+bool isBinary(FILE *file);
+
+void handleFileError(const char *action, const char *filename);
+
 
 int main(int argc, char *argv[]) {
-    if (argc < 4) {
-        printf("Usage: %s -b [-o outputfile] [files...] or %s -a archivefile outputdir or %s -h for help\n", argv[0], argv[0], argv[0]);
-        return 1;
-    }
+    if (argc < 3 || (strcmp(argv[1], "-b") != 0 && strcmp(argv[1], "-a") != 0)) {
+        printf("Usage: %s -b input_files -o output_file\n", argv[0]);
+        printf("       %s -a archive_file extract_directory\n", argv[0]);
+        return EXIT_FAILURE;
+    } else if (strcmp(argv[1], "-b") == 0) {
+        char *outputFileName = "a.sau"; // Default output file name
+        FileInfo fileInfos[MAX_FILES];
+        int numFiles = 0;
+        long totalSize = 0;
 
-    char *operation = argv[1];
-
-    if (strcmp(operation, "-b") == 0) {
-        char *outputFile = "a.sau"; // Default output file name
-
+        int outputIndex = -1;
         for (int i = 2; i < argc; i++) {
-            if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
-                // Use the specified output file name
-                outputFile = argv[i + 1];
-                i++;
-            }
-        }
-
-        // Extract the input files
-        char *inputFiles[MAX_FILES];
-        int numInputFiles = 0;
-        size_t totalSize = 0;
-
-        for (int i = 2; i < argc; i++) {
-            if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
-                // Skip the -o option and its argument
-                i++;
+            if (strcmp(argv[i], "-o") == 0) {
+                outputIndex = i;
+                break;
             } else {
-                // Check and validate each input file
-                FILE *file = fopen(argv[i], "rb");
-                if (file == NULL) {
-                    perror("Error opening input file");
-                    exit(EXIT_FAILURE);
-                }
-
-                fseek(file, 0, SEEK_END);
-                size_t fileSize = ftell(file);
-                fseek(file, 0, SEEK_SET);
-
-                if (fileSize > MAX_TOTAL_SIZE) {
-                    printf("Total size of input files exceeds the limit (200 MB).\n");
-                    exit(EXIT_FAILURE);
-                }
-
-                if (numInputFiles >= MAX_FILES) {
-                    printf("Number of input files exceeds the limit (32).\n");
-                    exit(EXIT_FAILURE);
-                }
-
-                // Check if the file contains only printable ASCII characters
-                int isAscii = 1;
-                int ch;
-                while ((ch = fgetc(file)) != EOF) {
-                    if (ch < 32 || ch > 126) {  // Printable ASCII characters range
-                        isAscii = 0;
-                        break;
-                    }
-                }
-
-                fclose(file);
-
-                if (!isAscii) {
-                    printf("File %s format is incompatible! Only printable ASCII text files are allowed.\n", argv[i]);
-                    exit(EXIT_FAILURE);
-                }
-
-                totalSize += fileSize;
-                inputFiles[numInputFiles++] = argv[i];
+                processFile(fileInfos, &numFiles, &totalSize, argv[i]);
             }
         }
-
-        createArchive(outputFile, inputFiles, numInputFiles);
-        printf("The files have been merged.\n");
-    } else if (strcmp(operation, "-a") == 0) {
-        char *archiveFile = argv[2];
-        char *outputDir = argv[3];
-
-        // Check if the archive file is appropriate
-        FILE *archive = fopen(archiveFile, "rb");
-
-        if (archive == NULL) {
-            perror("Error opening archive file");
-            exit(EXIT_FAILURE);
+        if (outputIndex != -1) {
+            if (outputIndex + 1 >= argc || !strstr(argv[outputIndex + 1], ".sau")) {
+                printf("Invalid output file name!\n");
+                freeFileInfoContent(fileInfos, numFiles);
+                return EXIT_FAILURE;
+            }
+            outputFileName = argv[outputIndex + 1];
+        } else {
+            printf("Output file name not provided, using default 'a.sau'.\n");
         }
 
-        // Read the first 10 bytes to get the size of the organization section
-        char orgSizeStr[11];
-        fread(orgSizeStr, sizeof(char), 10, archive);
-        orgSizeStr[10] = '\0';
-        size_t orgSize = atoi(orgSizeStr);
+        writeToArchive(fileInfos, numFiles, totalSize, outputFileName);
+    } else if (strcmp(argv[1], "-a") == 0) {
+        if (argc < 4) {
+            printf("Usage: %s -a archive_file extract_directory\n", argv[0]);
+            return EXIT_FAILURE;
+        }
 
-        fseek(archive, orgSize, SEEK_SET);
+        char *archiveFileName = argv[2];
+        char *extractDirectory = argc == 4 ? argv[3] : ".";
 
-        // Your code to check the appropriateness or corruption of the archive file goes here
-        // ...
+        FileInfo fileInfos[MAX_FILES];
+        int numFiles = 0;
 
-        fclose(archive);
-
-        // Extract the contents of the archive
-        extractArchive(archiveFile, outputDir);
-        printf("Files opened in the %s directory.\n", outputDir);
-    } else {
-        printf("Invalid operation. Use -b to create an archive or -a to extract from an archive.\n");
-        return 1;
+        //readArchive(archiveFileName, fileInfos, &numFiles);
+        extractArchive(archiveFileName,fileInfos, numFiles, extractDirectory);
     }
 
-    return 0;
+    return EXIT_SUCCESS;
 }
 
-void createArchive(char *outputFile, char *files[], int numFiles) {
-    FILE *archive = fopen(outputFile, "wb");
+void handleFileError(const char *action, const char *filename) {
+    fprintf(stderr, "Error %s file: %s\n", action, filename);
+    perror(NULL);
+    exit(EXIT_FAILURE);
+}
 
-    if (archive == NULL) {
-        perror("Error opening output file");
+void freeFileInfoContent(FileInfo *fileInfos, int numFiles) {
+    for (int i = 0; i < numFiles; i++) {
+        free(fileInfos[i].content);
+    }
+}
+
+void writeToArchive(FileInfo *fileInfos, int numFiles, long totalSize, const char *outputFileName) {
+    FILE *archiveFile = fopen(outputFileName, "wb");
+    if (archiveFile == NULL) {
+        printf("Error creating archive file!\n");
+        freeFileInfoContent(fileInfos, numFiles);
         exit(EXIT_FAILURE);
     }
 
-    // Write the initial placeholder for the organization section size
-    char orgSizePlaceholder[] = "0000000000";
-    fwrite(orgSizePlaceholder, sizeof(char), 10, archive);
+    // Write the Organization Section header
+    fprintf(archiveFile, "Organization Section:\n");
+    fprintf(archiveFile, "Size: %010ld\n", totalSize);
 
-    // Write the organization (contents) section
+    // Write the Organization Section contents
+    fprintf(archiveFile, "|");
     for (int i = 0; i < numFiles; i++) {
-        FILE *file = fopen(files[i], "rb");
+        fprintf(archiveFile, "%s,%s,%ld|", fileInfos[i].filename, fileInfos[i].permissions, fileInfos[i].size);
+    }
+    fprintf(archiveFile, "\n");
 
-        if (file == NULL) {
-            perror("Error opening input file");
-            exit(EXIT_FAILURE);
-        }
+    // Write the Archived Files header
+    fprintf(archiveFile, "Archived Files:\n");
 
-        // Write the filename, permissions, and size to the organization section
-        fprintf(archive, "%s|%s|%ld|", files[i], "rw-r--r--", ftell(file));
-
-        fclose(file);
+    // Write the content of each archived file
+    for (int i = 0; i < numFiles; i++) {
+        fprintf(archiveFile, "im %s\n", fileInfos[i].filename);
     }
 
-    // Get the current position (end of organization section) and update the organization size
-    size_t orgSize = ftell(archive);
-    fseek(archive, 0, SEEK_SET);
-    fprintf(archive, "%010lu", orgSize);
+    fclose(archiveFile);
 
-    // Move to the end of the organization section
-    fseek(archive, orgSize, SEEK_SET);
-
-    // Write the archived files
-    for (int i = 0; i < numFiles; i++) {
-        FILE *file = fopen(files[i], "rb");
-
-        if (file == NULL) {
-            perror("Error opening input file");
-            exit(EXIT_FAILURE);
-        }
-
-                char buffer[1024];
-        size_t bytesRead;
-
-        while ((bytesRead = fread(buffer, sizeof(char), sizeof(buffer), file)) > 0) {
-            fwrite(buffer, sizeof(char), bytesRead, archive);
-        }
-
-        fclose(file);
-    }
-
-    fclose(archive);
+    printf("The files have been merged.\n");
 }
 
-void extractArchive(char *archiveFile, char *outputDir) {
-    fprintf(stderr, "Starting extraction...\n");
-    FILE *archive = fopen(archiveFile, "rb");
 
-    if (archive == NULL) {
+bool isBinary(FILE *file) {
+    int ch;
+    while ((ch = fgetc(file)) != EOF) {
+        if (ch == 0) {
+            return true;  // Null byte found, indicating a binary file
+        }
+    }
+    return false;  // No null bytes found, indicating a text file
+}
+
+void processFile(FileInfo *fileInfos, int *numFiles, long *totalSize, const char *filename) {
+    FILE *file = fopen(filename, "rb");
+    if (file) {
+        fseek(file, 0, SEEK_END);
+        long fileSize = ftell(file);
+        rewind(file);
+
+        // Check if the file is binary
+        if (isBinary(file)) {
+            printf("%s input file format is incompatible! \n", filename);
+            fclose(file);
+            return;
+        }
+
+        // Obtain file permissions
+        struct stat fileStat;
+        if (stat(filename, &fileStat) == 0) {
+            mode_t permissions = fileStat.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO);
+            snprintf(fileInfos[*numFiles].permissions, sizeof(fileInfos[*numFiles].permissions), "%o", permissions);
+        } else {
+            perror("Failed to obtain permissions for file");
+            snprintf(fileInfos[*numFiles].permissions, sizeof(fileInfos[*numFiles].permissions), "default");
+        }
+
+        strcpy(fileInfos[*numFiles].filename, filename);
+        fileInfos[*numFiles].size = fileSize;
+
+        // Allocate memory for content and read file content
+        fileInfos[*numFiles].content = (char *)malloc(fileSize + 1);
+        if (fileInfos[*numFiles].content == NULL) {
+            perror("Memory allocation error");
+            fclose(file);
+            return;
+        }
+
+        fread(fileInfos[*numFiles].content, sizeof(char), fileSize, file);
+        fileInfos[*numFiles].content[fileSize] = '\0';  // Null-terminate the content
+        *totalSize += fileSize;
+        (*numFiles)++;
+
+        fclose(file);
+    } else {
+        perror("Error opening file");
+    }
+}
+
+void extractArchive(const char *archiveFileName, FileInfo *fileInfos, int numFiles, const char *extractDirectory) {
+    FILE *archiveFile = fopen(archiveFileName, "rb");
+    if (!archiveFile) {
         perror("Error opening archive file");
         exit(EXIT_FAILURE);
     }
 
-    // Read the first 10 bytes to get the size of the organization section
-    char orgSizeStr[11];
-    fread(orgSizeStr, sizeof(char), 10, archive);
-    orgSizeStr[10] = '\0';
-    size_t orgSize = atoi(orgSizeStr);
+    size_t organizationSize;
+    fscanf(archiveFile, "%010zu", &organizationSize);
+    fseek(archiveFile, organizationSize, SEEK_SET);
 
-    fprintf(stderr, "Reading organization section...\n");
-    fprintf(stderr, "Organization size: %lu\n", orgSize);
-
-    // Read the organization section
-    char *orgSection = (char *)malloc(orgSize + 1);
-    if (orgSection == NULL) {
-        perror("Error allocating memory");
-        exit(EXIT_FAILURE);
+    struct stat st = {0};
+    if (stat(extractDirectory, &st) == -1) {
+        if (mkdir(extractDirectory, 0755) == -1) {
+            perror("Error creating directory");
+            freeFileInfoContent(fileInfos, numFiles);
+            exit(EXIT_FAILURE);
+        }
     }
-    fprintf(stderr, "Organization section: %s\n", orgSection);
 
-    fread(orgSection, sizeof(char), orgSize, archive);
-    orgSection[orgSize] = '\0';
+    char buffer[1024];
+    fgets(buffer, sizeof(buffer), archiveFile);
 
-    // Parse the organization section and extract file information
-    char *record = strtok(orgSection, "|");
-    while (record != NULL) {
-        char *fileName = strtok(NULL, ",");
-        char *permissions = strtok(NULL, ",");
-        char *sizeStr = strtok(NULL, "|");
+    char *token = strtok(buffer, "|");
+    while (token != NULL) {
+        FileInfo fileInfo;
+        int result = sscanf(token, "%[^,],%[^,],%zu", fileInfo.filename, fileInfo.permissions, &fileInfo.size);
 
-        if (fileName != NULL && permissions != NULL && sizeStr != NULL) {
-            size_t size = atol(sizeStr);
+        // Check for valid tokenization and skip empty filenames
+        if (result == 3 && fileInfo.filename[0] != '\0') {
+            // Print file information for debugging
+            printf("File: %s, Permissions: %s, Size: %zu\n", fileInfo.filename, fileInfo.permissions, fileInfo.size);
 
-            // Construct the output file path
-            char outputPath[MAX_FILENAME_LENGTH];
-            snprintf(outputPath, sizeof(outputPath), "%s/%s", outputDir, fileName);
+            // Create the full path for the extracted file
+            char filePath[FILEPATH_BUFFER_SIZE];
+            snprintf(filePath, sizeof(filePath), "%s/%s", extractDirectory, fileInfo.filename);
 
-            // Create the output directory if it doesn't exist
-            struct stat st = {0};
-            if (stat(outputDir, &st) == -1) {
-                if (mkdir(outputDir, 0700) == -1) {
-                    perror("Error creating output directory");
-                    exit(EXIT_FAILURE);
-                }
-            }
-
-            FILE *outputFile = fopen(outputPath, "wb");
-
-            if (outputFile == NULL) {
-                perror("Error creating output file");
+            FILE *outputFile = fopen(filePath, "wb");
+            if (!outputFile) {
+                perror("Error creating file");
+                freeFileInfoContent(fileInfos, numFiles);
                 exit(EXIT_FAILURE);
             }
 
-            // Read the file contents from the archive and write to the output file
-            char buffer[1024];
-            size_t bytesRead;
-
-            while ((bytesRead = fread(buffer, sizeof(char), sizeof(buffer), archive)) > 0) {
-                fwrite(buffer, sizeof(char), bytesRead, outputFile);
-                size -= bytesRead;
-
-                if (size <= 0) {
-                    break;
-                }
+            // Copy content from the archive to the extracted file
+            size_t bytesRead = 0;
+            while (bytesRead < fileInfo.size) {
+                char buffer[CONTENT_BUFFER_SIZE];
+                size_t chunkSize = fread(buffer, 1, sizeof(buffer), archiveFile);
+                fwrite(buffer, 1, chunkSize, outputFile);
+                bytesRead += chunkSize;
             }
 
             fclose(outputFile);
 
-            // Set the file permissions based on the original permissions
-            chmod(outputPath, strtol(permissions, NULL, 8));
+            // Set file permissions
+            mode_t permissions;
+            sscanf(fileInfo.permissions, "%o", &permissions);
+            if (chmod(filePath, permissions) == -1) {
+                perror("Error setting file permissions");
+                freeFileInfoContent(fileInfos, numFiles);
+                exit(EXIT_FAILURE);
+            }
         }
 
-        record = strtok(NULL, "|");
+        token = strtok(NULL, "|");
     }
 
-    fclose(archive);
-    fprintf(stderr, "Extraction complete.\n");
-    free(orgSection);
+    fclose(archiveFile);
+
+    printf("Files extracted to the %s directory.\n", extractDirectory);
 }
+
 
